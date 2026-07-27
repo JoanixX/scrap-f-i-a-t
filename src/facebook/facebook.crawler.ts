@@ -43,16 +43,91 @@ export class FacebookCrawler extends BaseCrawler {
     return 'Facebook';
   }
 
+  /**
+   * Searches Facebook for pages/profiles. Cuts off immediately once 10 URLs are collected.
+   */
+  public override async search(queries: string[], maxResults: number = 10): Promise<string[]> {
+    const discoveredUrls: Set<string> = new Set();
+    const limit = Math.min(maxResults, 10);
+
+    logger.info(`[Facebook Search] Starting discovery (Target Limit: ${limit})`);
+
+    for (const query of queries) {
+      if (discoveredUrls.size >= limit) {
+        logger.info(`[Facebook Search] Limit of ${limit} reached. Cutting off query loop.`);
+        break;
+      }
+
+      const searchEndpoints = [
+        `https://www.facebook.com/search/pages/?q=${encodeURIComponent(query)}`,
+        `https://www.facebook.com/search/top/?q=${encodeURIComponent(query)}`,
+      ];
+
+      for (const searchUrl of searchEndpoints) {
+        if (discoveredUrls.size >= limit) break;
+        logger.info(`[Facebook Search] Query: "${query}" -> ${searchUrl}`);
+
+        try {
+          await this.page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
+          await this.humanDelay(2000, 3500);
+
+          let scrollAttempts = 0;
+          const maxScrolls = 5;
+
+          while (discoveredUrls.size < limit && scrollAttempts < maxScrolls) {
+            await this.smoothScroll(4, 700);
+            await this.humanDelay(1200, 2000);
+
+            const foundLinks = await this.page.evaluate(() => {
+              const anchors = Array.from(document.querySelectorAll('a[href*="facebook.com/"]'));
+              const urls: string[] = [];
+              anchors.forEach((a) => {
+                const href = a.getAttribute('href') || '';
+                if (
+                  href.includes('facebook.com') &&
+                  !href.includes('/search/') &&
+                  !href.includes('/groups/') &&
+                  !href.includes('/watch/') &&
+                  !href.includes('/help/') &&
+                  !href.includes('/login')
+                ) {
+                  const cleanUrl = href.split('?')[0].split('&')[0];
+                  if (cleanUrl.length > 22 && !cleanUrl.endsWith('facebook.com/')) {
+                    urls.push(cleanUrl);
+                  }
+                }
+              });
+              return urls;
+            });
+
+            foundLinks.forEach((url) => {
+              if (discoveredUrls.size < limit) {
+                discoveredUrls.add(url);
+              }
+            });
+
+            logger.info(`[Facebook Search] Total collected: ${discoveredUrls.size}/${limit}`);
+            scrollAttempts++;
+          }
+        } catch (err: any) {
+          logger.warn(`[Facebook Search] Error querying ${searchUrl}: ${err.message}`);
+        }
+      }
+    }
+
+    const result = Array.from(discoveredUrls).slice(0, limit);
+    logger.info(`[Facebook Search] Final discovered competitor URLs: ${result.length}/${limit}`);
+    return result;
+  }
+
   public async extract(): Promise<RawFacebookData> {
     logger.info(`Extracting Facebook data from: ${this.currentUrl}`);
     
-    // Smooth scroll down to trigger dynamic loading of content & comments
     await this.smoothScroll(4, 500);
     await this.humanDelay(1500, 2500);
 
     const title = await this.page.title();
 
-    // Extract basic page or post name from h1, page header, or meta title
     const pageName = await this.page.evaluate(() => {
       const h1 = document.querySelector('h1');
       if (h1 && h1.textContent?.trim()) return h1.textContent.trim();
@@ -61,13 +136,13 @@ export class FacebookCrawler extends BaseCrawler {
       return null;
     });
 
-    // Extract main visible text from the page body / main container
     const fullText = await this.page.evaluate(() => {
-      const main = document.querySelector('div[role="main"]') || document.body;
-      return main ? main.textContent || '' : '';
+      const clone = (document.querySelector('div[role="main"]') || document.body).cloneNode(true) as Element;
+      const unwanted = clone.querySelectorAll('script, style, noscript, svg, template');
+      unwanted.forEach((n) => n.remove());
+      return clone.textContent || '';
     });
 
-    // Extract Open Graph description
     const ogDescription = await this.page.evaluate(() => {
       const metaDesc = document.querySelector('meta[property="og:description"]') || document.querySelector('meta[name="description"]');
       return metaDesc ? metaDesc.getAttribute('content') : null;
@@ -75,12 +150,10 @@ export class FacebookCrawler extends BaseCrawler {
 
     const description = cleanText(ogDescription || fullText.substring(0, 500));
 
-    // Contact details & metadata extraction
     const phone = extractPhone(fullText);
     const email = extractEmail(fullText);
     const whatsapp = extractWhatsApp(fullText);
 
-    // Website link extraction
     const website = await this.page.evaluate(() => {
       const linkElems = Array.from(document.querySelectorAll('a[href*="http"]'));
       for (const el of linkElems) {
@@ -92,7 +165,6 @@ export class FacebookCrawler extends BaseCrawler {
       return null;
     });
 
-    // Extract image elements count
     const imageCount = await this.page.evaluate(() => {
       const imgs = document.querySelectorAll('img');
       let count = 0;
@@ -105,23 +177,18 @@ export class FacebookCrawler extends BaseCrawler {
       return count > 0 ? count : imgs.length;
     });
 
-    // Extract price if present (e.g. $150, USD 100, $150.00)
     const priceMatch = fullText.match(/(\$|USD\s?|COP\s?|€\s?)\d+([.,]\d+)?/i);
     const price = priceMatch ? priceMatch[0] : null;
 
-    // Extract location hint
     const locationMatch = fullText.match(/(Ubicación|Location|Dirección|Address|Ciudad|En)\s*:\s*([^.\n]+)/i);
     const location = locationMatch ? cleanText(locationMatch[2]) : null;
 
-    // Extract category hint
     const categoryMatch = fullText.match(/(Categoría|Category)\s*:\s*([^.\n]+)/i);
     const category = categoryMatch ? cleanText(categoryMatch[2]) : null;
 
-    // Extract hours hint
     const hoursMatch = fullText.match(/(Horario|Hours|Abierto|Open)\s*:\s*([^.\n]+)/i);
     const hours = hoursMatch ? cleanText(hoursMatch[2]) : null;
 
-    // Extract visible comments
     const comments = await this.page.evaluate(() => {
       const results: Array<{ author?: string; text?: string }> = [];
       const commentNodes = document.querySelectorAll('div[role="article"], div[aria-label*="Comentario"], div[aria-label*="Comment"]');
@@ -134,7 +201,6 @@ export class FacebookCrawler extends BaseCrawler {
       return results.slice(0, 15);
     });
 
-    // Extract approximate reaction count
     const reactionsText = await this.page.evaluate(() => {
       const elem = document.querySelector('span[aria-label*="reacciones"], span[aria-label*="reactions"], span[aria-label*="Me gusta"]');
       return elem ? elem.getAttribute('aria-label') || elem.textContent : null;

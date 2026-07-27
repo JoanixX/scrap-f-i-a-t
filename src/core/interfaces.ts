@@ -54,6 +54,12 @@ export interface CompetitorCrawler {
    * Normalizes raw extracted data into standard NormalizedCompetitorData format.
    */
   normalize(raw: any): NormalizedCompetitorData;
+
+  /**
+   * Automated discovery mode: Searches platform for a given set of queries/keywords
+   * and returns an array of up to maxResults competitor URLs.
+   */
+  search?(queries: string[], maxResults?: number): Promise<string[]>;
 }
 
 /**
@@ -64,4 +70,6 @@ export interface CrawlerOptions {
   timeout?: number;
   storageStatePath?: string;
   maxPostsPerProfile?: number;
+  queries?: string[];
+  limitPerPlatform?: number;
 }

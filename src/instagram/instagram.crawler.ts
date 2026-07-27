@@ -46,36 +46,99 @@ export class InstagramCrawler extends BaseCrawler {
     return 'Instagram';
   }
 
+  /**
+   * Searches Instagram across query variations/hashtags.
+   * Immediately cuts off query loop once 10 competitor profile URLs are collected.
+   */
+  public override async search(queries: string[], maxResults: number = 10): Promise<string[]> {
+    const discoveredUrls: Set<string> = new Set();
+    const limit = Math.min(maxResults, 10);
+
+    logger.info(`[Instagram Search] Starting discovery (Target Limit: ${limit})`);
+
+    const endpoints: string[] = [];
+    for (const q of queries) {
+      endpoints.push(`https://www.instagram.com/explore/search/keyword/?q=${encodeURIComponent(q)}`);
+    }
+
+    endpoints.push('https://www.instagram.com/explore/tags/santarosadequives/');
+    endpoints.push('https://www.instagram.com/explore/tags/casadecampoquives/');
+
+    for (const searchUrl of endpoints) {
+      if (discoveredUrls.size >= limit) {
+        logger.info(`[Instagram Search] Target limit of ${limit} reached. Cutting off query loop.`);
+        break;
+      }
+      logger.info(`[Instagram Search] Query: ${searchUrl}`);
+
+      try {
+        await this.page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
+        await this.humanDelay(2000, 3500);
+
+        let scrollAttempts = 0;
+        const maxScrolls = 3;
+
+        while (discoveredUrls.size < limit && scrollAttempts < maxScrolls) {
+          await this.smoothScroll(4, 600);
+          await this.humanDelay(1200, 2000);
+
+          const foundLinks = await this.page.evaluate(() => {
+            const anchors = Array.from(document.querySelectorAll('a[href*="/"]'));
+            const urls: string[] = [];
+            anchors.forEach((a) => {
+              const href = a.getAttribute('href') || '';
+              if (href.startsWith('/') && !href.includes('/explore/') && !href.includes('/reels/') && !href.includes('/direct/')) {
+                const parts = href.split('/').filter(Boolean);
+                if (parts.length === 1 && !['about', 'legal', 'privacy', 'help', 'api', 'accounts'].includes(parts[0])) {
+                  urls.push(`https://www.instagram.com/${parts[0]}`);
+                }
+              }
+            });
+            return urls;
+          });
+
+          foundLinks.forEach((url) => {
+            if (discoveredUrls.size < limit) {
+              discoveredUrls.add(url);
+            }
+          });
+
+          logger.info(`[Instagram Search] Total collected: ${discoveredUrls.size}/${limit}`);
+          scrollAttempts++;
+        }
+      } catch (err: any) {
+        logger.warn(`[Instagram Search] Error querying ${searchUrl}: ${err.message}`);
+      }
+    }
+
+    const result = Array.from(discoveredUrls).slice(0, limit);
+    logger.info(`[Instagram Search] Final discovered competitor URLs: ${result.length}/${limit}`);
+    return result;
+  }
+
   public async extract(): Promise<RawInstagramData> {
     logger.info(`Extracting Instagram profile data from: ${this.currentUrl}`);
     
-    // Wait for main header or body to load
     await this.page.waitForLoadState('domcontentloaded');
     await this.humanDelay(2000, 3500);
 
-    // Extract basic profile headers via header / meta tags or DOM selectors
     const profileInfo = await this.page.evaluate(() => {
       const metaTitle = document.querySelector('meta[property="og:title"]')?.getAttribute('content') || '';
       const metaDesc = document.querySelector('meta[property="og:description"]')?.getAttribute('content') || '';
 
-      // Meta desc usually looks like: "1,234 Followers, 500 Following, 120 Posts - See Instagram photos and videos from Name (@username)"
       const followersMatch = metaDesc.match(/([\d.,KkMm]+)\s*Followers/i) || metaDesc.match(/([\d.,KkMm]+)\s*Seguidores/i);
       const followingMatch = metaDesc.match(/([\d.,KkMm]+)\s*Following/i) || metaDesc.match(/([\d.,KkMm]+)\s*Seguidos/i);
       const postsMatch = metaDesc.match(/([\d.,KkMm]+)\s*Posts/i) || metaDesc.match(/([\d.,KkMm]+)\s*Publicaciones/i);
 
-      // Extract username from URL path or meta title
       const pathParts = window.location.pathname.split('/').filter(Boolean);
       const username = pathParts.length > 0 ? pathParts[0] : null;
 
-      // Extract Header Name
       const nameElem = document.querySelector('header h1, header h2, header section span');
       const name = nameElem ? nameElem.textContent?.trim() : null;
 
-      // Bio text
       const bioElem = document.querySelector('header section > div:last-child, header h1 ~ span, header h2 ~ span');
       const bio = bioElem ? bioElem.textContent?.trim() : null;
 
-      // External links
       const links: string[] = [];
       const externalLinkElems = document.querySelectorAll('header a[target="_blank"]');
       externalLinkElems.forEach((a) => {
@@ -98,14 +161,11 @@ export class InstagramCrawler extends BaseCrawler {
       };
     });
 
-    // Scroll down to expose post grid
     await this.smoothScroll(3, 400);
     await this.humanDelay(1500, 2500);
 
-    // Extract recent post grid items
     const extractedPosts: InstagramPost[] = await this.page.evaluate((limit) => {
       const posts: InstagramPost[] = [];
-      // Posts are usually <a> elements inside the profile main container pointing to /p/code/ or /reel/code/
       const postLinks = Array.from(document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]'));
       
       const uniqueLinks = postLinks.slice(0, limit);
@@ -128,11 +188,9 @@ export class InstagramCrawler extends BaseCrawler {
       return posts;
     }, this.maxPosts);
 
-    // Process hashtags across extracted posts and bio
     const allText = (profileInfo.bio || '') + ' ' + extractedPosts.map((p) => p.text || '').join(' ');
     const frequentHashtags = extractHashtags(allText);
 
-    // Enrich post objects with hashtags
     extractedPosts.forEach((post) => {
       if (post.text) {
         post.hashtags = extractHashtags(post.text);

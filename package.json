@@ -1,0 +1,34 @@
+{
+  "name": "accommodation-market-research-scraper",
+  "version": "1.0.0",
+  "description": "Modular Playwright + TypeScript market research crawler for accommodation competitors (Facebook, Instagram, TikTok, Airbnb)",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "ts-node src/index.ts",
+    "setup-auth": "ts-node src/auth-setup.ts"
+  },
+  "keywords": [
+    "playwright",
+    "typescript",
+    "scraper",
+    "market-research",
+    "facebook",
+    "instagram",
+    "tiktok",
+    "airbnb"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "csv-writer": "^1.6.0",
+    "dotenv": "^16.4.5",
+    "playwright": "^1.42.1",
+    "winston": "^3.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}

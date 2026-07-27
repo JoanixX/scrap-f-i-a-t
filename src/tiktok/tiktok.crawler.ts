@@ -44,37 +44,103 @@ export class TikTokCrawler extends BaseCrawler {
     return 'TikTok';
   }
 
+  /**
+   * Searches TikTok across queries/endpoints.
+   * Immediately cuts off query loop once 10 competitor URLs are collected.
+   */
+  public override async search(queries: string[], maxResults: number = 10): Promise<string[]> {
+    const discoveredUrls: Set<string> = new Set();
+    const limit = Math.min(maxResults, 10);
+
+    logger.info(`[TikTok Search] Starting discovery (Target Limit: ${limit})`);
+
+    for (const query of queries) {
+      if (discoveredUrls.size >= limit) {
+        logger.info(`[TikTok Search] Target limit of ${limit} reached. Cutting off query loop.`);
+        break;
+      }
+
+      const endpoints = [
+        `https://www.tiktok.com/search?q=${encodeURIComponent(query)}`,
+        `https://www.tiktok.com/search/user?q=${encodeURIComponent(query)}`,
+      ];
+
+      for (const searchUrl of endpoints) {
+        if (discoveredUrls.size >= limit) break;
+        logger.info(`[TikTok Search] Query: "${query}" -> ${searchUrl}`);
+
+        try {
+          await this.page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
+          await this.humanDelay(2000, 3500);
+
+          let scrollAttempts = 0;
+          const maxScrolls = 4;
+
+          while (discoveredUrls.size < limit && scrollAttempts < maxScrolls) {
+            await this.smoothScroll(4, 600);
+            await this.humanDelay(1200, 2000);
+
+            const foundLinks = await this.page.evaluate(() => {
+              const anchors = Array.from(document.querySelectorAll('a[href*="/video/"], a[href*="/@"]'));
+              const urls: string[] = [];
+              anchors.forEach((a) => {
+                const href = a.getAttribute('href') || '';
+                if (href.startsWith('http')) {
+                  urls.push(href);
+                } else if (href.startsWith('/') && href.length > 2) {
+                  urls.push(`https://www.tiktok.com${href}`);
+                }
+              });
+              return urls;
+            });
+
+            foundLinks.forEach((url) => {
+              if (discoveredUrls.size < limit && (url.includes('/video/') || url.includes('/@'))) {
+                const clean = url.split('?')[0];
+                if (!clean.endsWith('tiktok.com/@') && !clean.endsWith('tiktok.com/')) {
+                  discoveredUrls.add(clean);
+                }
+              }
+            });
+
+            logger.info(`[TikTok Search] Total collected: ${discoveredUrls.size}/${limit}`);
+            scrollAttempts++;
+          }
+        } catch (err: any) {
+          logger.warn(`[TikTok Search] Error querying ${searchUrl}: ${err.message}`);
+        }
+      }
+    }
+
+    const result = Array.from(discoveredUrls).slice(0, limit);
+    logger.info(`[TikTok Search] Final discovered competitor URLs: ${result.length}/${limit}`);
+    return result;
+  }
+
   public async extract(): Promise<RawTikTokData> {
     logger.info(`Extracting TikTok data from: ${this.currentUrl}`);
     
     await this.page.waitForLoadState('domcontentloaded');
     await this.humanDelay(2500, 4000);
 
-    // Scroll down to load profile header & videos
     await this.smoothScroll(3, 400);
     await this.humanDelay(1500, 2500);
 
     const extracted = await this.page.evaluate((limit) => {
-      // Extract from meta tags as robust fallback
       const ogTitle = document.querySelector('meta[property="og:title"]')?.getAttribute('content') || '';
       const ogDesc = document.querySelector('meta[property="og:description"]')?.getAttribute('content') || '';
 
-      // Username extraction from URL
       const pathParts = window.location.pathname.split('/').filter(Boolean);
       const usernamePart = pathParts.find((p) => p.startsWith('@'));
       const username = usernamePart ? usernamePart.replace('@', '') : null;
 
-      // Extract Followers & Likes from page or meta description
-      // Meta desc often contains: "Watch the latest videos from Name (@user). 10.5K Followers. 500K Likes."
       const followersMatch = ogDesc.match(/([\d.,KkMm]+)\s*Followers/i) || ogDesc.match(/([\d.,KkMm]+)\s*Seguidores/i);
       const likesMatch = ogDesc.match(/([\d.,KkMm]+)\s*Likes/i) || ogDesc.match(/([\d.,KkMm]+)\s*Me gusta/i);
 
-      // DOM selectors for Name & Bio
       const nameElem = document.querySelector('h1[data-e2e="user-title"], h2[data-e2e="user-subtitle"], [data-e2e="user-title"]');
       const bioElem = document.querySelector('h2[data-e2e="user-bio"], [data-e2e="user-bio"]');
       const linkElem = document.querySelector('a[data-e2e="user-link"]');
 
-      // Video items from profile video grid
       const videoNodes = Array.from(document.querySelectorAll('div[data-e2e="user-post-item"], a[href*="/video/"]'));
       const videos: TikTokVideo[] = [];
 
@@ -82,11 +148,9 @@ export class TikTokCrawler extends BaseCrawler {
         const aElem = node.tagName.toLowerCase() === 'a' ? node : node.querySelector('a[href*="/video/"]');
         const href = aElem ? aElem.getAttribute('href') || '' : '';
         
-        // Views count overlay
         const viewsElem = node.querySelector('[data-e2e="video-views"], span');
         const viewsText = viewsElem ? viewsElem.textContent?.trim() : null;
 
-        // Image or text alt
         const img = node.querySelector('img');
         const desc = img ? img.getAttribute('alt') || '' : '';
 
@@ -110,7 +174,6 @@ export class TikTokCrawler extends BaseCrawler {
       };
     }, this.maxVideos);
 
-    // Process hashtags across extracted video descriptions
     extracted.videos.forEach((video) => {
       if (video.description) {
         video.hashtags = extractHashtags(video.description);

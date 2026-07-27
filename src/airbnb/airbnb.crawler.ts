@@ -27,6 +27,7 @@ export interface RawAirbnbData {
   houseRules: string[];
   checkInCheckOut: string | null;
   visibleReviews: Array<{ author?: string; text?: string; date?: string }>;
+  isErrorPage?: boolean;
   scrapedAt: string;
 }
 
@@ -39,81 +40,172 @@ export class AirbnbCrawler extends BaseCrawler {
     return 'Airbnb';
   }
 
+  /**
+   * Searches Airbnb across query variations.
+   * Immediately cuts off once target limit (default 10) is reached.
+   */
+  public override async search(queries: string[], maxResults: number = 10): Promise<string[]> {
+    const discoveredUrls: Set<string> = new Set();
+    const limit = Math.min(maxResults, 10);
+
+    logger.info(`[Airbnb Search] Starting discovery (Target Limit: ${limit})`);
+
+    for (const query of queries) {
+      if (discoveredUrls.size >= limit) {
+        logger.info(`[Airbnb Search] Target limit of ${limit} reached. Cutting off query loop.`);
+        break;
+      }
+
+      const searchUrl = `https://www.airbnb.com/s/${encodeURIComponent(query)}/homes`;
+      logger.info(`[Airbnb Search] Query: "${query}" -> ${searchUrl}`);
+
+      try {
+        await this.page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
+        await this.humanDelay(2000, 3500);
+
+        let pageNum = 1;
+        const maxPages = 2;
+
+        while (discoveredUrls.size < limit && pageNum <= maxPages) {
+          await this.smoothScroll(3, 500);
+          await this.humanDelay(1000, 2000);
+
+          const foundLinks = await this.page.evaluate(() => {
+            const links = Array.from(document.querySelectorAll('a[href*="/rooms/"]'));
+            return links
+              .map((a) => a.getAttribute('href') || '')
+              .filter((href) => href.includes('/rooms/'));
+          });
+
+          for (const rawHref of foundLinks) {
+            const match = rawHref.match(/\/rooms\/(\d+)/);
+            if (match) {
+              const canonicalUrl = `https://www.airbnb.com/rooms/${match[1]}`;
+              discoveredUrls.add(canonicalUrl);
+              if (discoveredUrls.size >= limit) break;
+            }
+          }
+
+          logger.info(`[Airbnb Search] Total collected: ${discoveredUrls.size}/${limit}`);
+          if (discoveredUrls.size >= limit) break;
+
+          const navigatedNext = await this.page.evaluate(() => {
+            const nextNav = document.querySelector('a[aria-label="Siguiente"], a[aria-label="Next"], button[aria-label="Siguiente"], button[aria-label="Next"]');
+            if (nextNav) {
+              (nextNav as HTMLElement).click();
+              return true;
+            }
+            return false;
+          });
+
+          if (!navigatedNext) break;
+          await this.humanDelay(2000, 3000);
+          pageNum++;
+        }
+      } catch (err: any) {
+        logger.warn(`[Airbnb Search] Error querying "${query}": ${err.message}`);
+      }
+    }
+
+    const result = Array.from(discoveredUrls).slice(0, limit);
+    logger.info(`[Airbnb Search] Final discovered competitor URLs: ${result.length}/${limit}`);
+    return result;
+  }
+
   public async extract(): Promise<RawAirbnbData> {
     logger.info(`Extracting Airbnb property listing data from: ${this.currentUrl}`);
 
     await this.page.waitForLoadState('domcontentloaded');
     await this.humanDelay(2000, 3500);
 
-    // Scroll down to load amenities and reviews sections
     await this.smoothScroll(5, 500);
     await this.humanDelay(1500, 2500);
 
     const extracted = await this.page.evaluate(() => {
-      // Name / Title
+      const getCleanDOMText = (root: Element | Document = document): string => {
+        const clone = root.cloneNode(true) as Element;
+        const unwanted = clone.querySelectorAll('script, style, noscript, svg, template, iframe');
+        unwanted.forEach((n) => n.remove());
+        return clone.textContent || '';
+      };
+
+      const visibleText = getCleanDOMText(document.body);
+
+      const is404 = visibleText.includes('404') || visibleText.includes('No hemos podido encontrar la página') || visibleText.includes('Page not found');
+      if (is404) {
+        return {
+          isErrorPage: true,
+          name: 'Página no encontrada / Listing no disponible (404)',
+          price: null,
+          currency: null,
+          rating: null,
+          reviewCount: null,
+          propertyType: null,
+          capacity: null,
+          bedrooms: null,
+          beds: null,
+          bathrooms: null,
+          amenities: [],
+          approxLocation: null,
+          description: 'La propiedad solicitada de Airbnb no existe o ya no está disponible.',
+          houseRules: [],
+          checkInCheckOut: null,
+          visibleReviews: [],
+        };
+      }
+
       const h1 = document.querySelector('h1');
       const name = h1 ? h1.textContent?.trim() : null;
 
-      // Meta tags fallbacks
       const metaTitle = document.querySelector('meta[property="og:title"]')?.getAttribute('content') || '';
       const metaDesc = document.querySelector('meta[name="description"]')?.getAttribute('content') || '';
 
-      // Price & Currency
       let priceText = null;
       let currencyText = null;
-      const priceElem = document.querySelector('span._1y74zjx, span._178d8k, span[aria-hidden="true"]');
-      const allText = document.body.textContent || '';
 
-      const priceMatch = allText.match(/(\$|USD|COP|EUR|€)\s?([\d.,]+)\s*(?:noche|night|\/night)/i);
+      const priceMatch = visibleText.match(/(\$|USD|COP|EUR|€)\s?([\d.,]+)\s*(?:noche|night|\/night)/i);
       if (priceMatch) {
         priceText = priceMatch[2];
         currencyText = priceMatch[1];
       }
 
-      // Rating & Reviews count
-      // Often looks like: "4.95 · 42 reseñas" or "5.0 (15 reviews)"
       let rating: number | null = null;
       let reviewCount: number | null = null;
 
-      const ratingMatch = allText.match(/([3-5]\.\d{1,2})\s*[·•]\s*([\d]+)\s*(?:reseñas|reviews)/i);
+      const ratingMatch = visibleText.match(/([3-5]\.\d{1,2})\s*[·•]\s*([\d]+)\s*(?:reseñas|reviews)/i);
       if (ratingMatch) {
         rating = parseFloat(ratingMatch[1]);
         reviewCount = parseInt(ratingMatch[2], 10);
       } else {
-        const altRatingMatch = allText.match(/([3-5]\.\d{1,2})\s*out of 5/i);
+        const altRatingMatch = visibleText.match(/([3-5]\.\d{1,2})\s*out of 5/i);
         if (altRatingMatch) {
           rating = parseFloat(altRatingMatch[1]);
         }
       }
 
-      // Property specs: capacity, bedrooms, beds, bathrooms
-      // Typical text: "6 huéspedes · 3 habitaciones · 4 camas · 2 baños"
       let capacity: string | null = null;
       let bedrooms: string | null = null;
       let beds: string | null = null;
       let bathrooms: string | null = null;
 
-      const specsMatch = allText.match(/([\d]+\s*huéspedes|[\d]+\s*guests)/i);
+      const specsMatch = visibleText.match(/([\d]+\s*huéspedes|[\d]+\s*guests)/i);
       if (specsMatch) capacity = specsMatch[0];
 
-      const bedMatch = allText.match(/([\d]+\s*dormitorios|[\d]+\s*habitaciones|[\d]+\s*bedrooms?)/i);
+      const bedMatch = visibleText.match(/([\d]+\s*dormitorios|[\d]+\s*habitaciones|[\d]+\s*bedrooms?)/i);
       if (bedMatch) bedrooms = bedMatch[0];
 
-      const bedsMatch = allText.match(/([\d]+\s*camas|[\d]+\s*beds?)/i);
+      const bedsMatch = visibleText.match(/([\d]+\s*camas|[\d]+\s*beds?)/i);
       if (bedsMatch) beds = bedsMatch[0];
 
-      const bathMatch = allText.match(/([\d.,]+\s*baños|[\d.,]+\s*baths?)/i);
+      const bathMatch = visibleText.match(/([\d.,]+\s*baños|[\d.,]+\s*baths?)/i);
       if (bathMatch) bathrooms = bathMatch[0];
 
-      // Location string
-      const locationMatch = allText.match(/(?:Ubicación|Location|Dónde estarás|Where you'll be)\s*[:\n]?\s*([^.\n]+)/i);
+      const locationMatch = visibleText.match(/(?:Ubicación|Location|Dónde estarás|Where you'll be)\s*[:\n]?\s*([^\n.]{4,60})/i);
       const approxLocation = locationMatch ? locationMatch[1].trim() : null;
 
-      // Property Type
-      const typeMatch = allText.match(/(Cabaña entera|Casa entera|Apartamento entero|Villa entera|Entire cabin|Entire home|Entire villa)/i);
-      const propertyType = typeMatch ? typeMatch[0] : 'Alojamientoturístico';
+      const typeMatch = visibleText.match(/(Cabaña entera|Casa entera|Apartamento entero|Villa entera|Entire cabin|Entire home|Entire villa)/i);
+      const propertyType = typeMatch ? typeMatch[0] : 'Alojamiento turístico';
 
-      // Amenities list extraction
       const amenities: string[] = [];
       const amenityElements = document.querySelectorAll('div[data-plugin-in-point="AMENITIES_DEFAULT"] div, section div[aria-label*="amenity"]');
       amenityElements.forEach((el) => {
@@ -123,7 +215,6 @@ export class AirbnbCrawler extends BaseCrawler {
         }
       });
 
-      // Reviews text
       const visibleReviews: Array<{ text: string }> = [];
       const reviewCards = document.querySelectorAll('div[data-review-id], div[aria-label*="Review"], span[class*="r15z1158"]');
       reviewCards.forEach((card) => {
@@ -134,6 +225,7 @@ export class AirbnbCrawler extends BaseCrawler {
       });
 
       return {
+        isErrorPage: false,
         name: name || metaTitle,
         price: priceText,
         currency: currencyText,
@@ -146,7 +238,7 @@ export class AirbnbCrawler extends BaseCrawler {
         bathrooms,
         amenities,
         approxLocation,
-        description: metaDesc || allText.substring(0, 800),
+        description: metaDesc || visibleText.substring(0, 800),
         houseRules: [],
         checkInCheckOut: null,
         visibleReviews: visibleReviews.slice(0, 10),
@@ -171,6 +263,7 @@ export class AirbnbCrawler extends BaseCrawler {
       houseRules: extracted.houseRules,
       checkInCheckOut: extracted.checkInCheckOut,
       visibleReviews: extracted.visibleReviews,
+      isErrorPage: extracted.isErrorPage,
       scrapedAt: new Date().toISOString(),
     };
   }

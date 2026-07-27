@@ -16,6 +16,15 @@ export abstract class BaseCrawler implements CompetitorCrawler {
   public abstract normalize(raw: any): NormalizedCompetitorData;
 
   /**
+   * Search method to discover competitor URLs based on array of search queries.
+   * Can be overridden by individual platform crawlers.
+   */
+  public async search(queries: string[], maxResults: number = 50): Promise<string[]> {
+    logger.info(`[${this.getPlatformName()}] Basic search executed for ${queries.length} queries (limit: ${maxResults})`);
+    return [];
+  }
+
+  /**
    * Opens the target URL and handles initial page loading logic.
    */
   public async open(url: string): Promise<void> {

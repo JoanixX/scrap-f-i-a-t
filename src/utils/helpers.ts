@@ -1,4 +1,15 @@
 /**
+ * Extracts visible inner text from a DOM element, explicitly excluding
+ * <script>, <style>, <noscript>, and SVG tags to prevent extracting JavaScript configs.
+ */
+export function getVisibleText(root: Element | Document = document): string {
+  const clone = root.cloneNode(true) as Element;
+  const unwantedNodes = clone.querySelectorAll('script, style, noscript, svg, template, iframe');
+  unwantedNodes.forEach((node) => node.remove());
+  return clone.textContent || '';
+}
+
+/**
  * Cleans string content by stripping excessive whitespaces, tabs, and linebreaks.
  */
 export function cleanText(text: string | null | undefined): string {

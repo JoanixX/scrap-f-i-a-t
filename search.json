@@ -1,0 +1,9 @@
+{
+  "queries": [
+    "casa de campo Santa Rosa de Quives",
+    "casa de campo Santa Rosa de Quives Country Club, Carretera Lima – Canta, Quives",
+    "casa de campo Santa Rosa de Quives, Departamento de Lima"
+  ],
+  "limitPerPlatform": 10,
+  "platforms": ["facebook", "instagram", "tiktok", "airbnb"]
+}
